@@ -5,6 +5,7 @@ import { CACHE_DIR, BRANCH_FALLBACKS } from "./constants";
 import { getRefDir, ensureRefDir, isGitRepo, runGit, extractRepoName } from "./helpers";
 import { createSidecar, deleteSidecar, type SidecarFrontmatter } from "./sidecar";
 import { getCacheMetaEntry, setCacheRemote, setCacheBranch, setCacheSearchPaths, seedDescription } from "./cache-meta";
+import { validateGitUrl, validateBranchName, validateEntryName, validateSearchPaths } from "./validation";
 
 // ─── Add entries ─────────────────────────────────────────────────────
 
@@ -53,6 +54,25 @@ export interface AddRepoOptions {
 
 export async function addRepo(cwd: string, url: string, options: AddRepoOptions = {}): Promise<{ success: boolean; message: string }> {
 	const { name: optName, branch: optBranch, paths = [], ephemeral = false } = options;
+
+	// Validate inputs
+	const urlValidation = validateGitUrl(url);
+	if (!urlValidation.ok) return { success: false, message: urlValidation.error };
+
+	if (optBranch) {
+		const branchValidation = validateBranchName(optBranch);
+		if (!branchValidation.ok) return { success: false, message: branchValidation.error };
+	}
+
+	if (optName) {
+		const nameValidation = validateEntryName(optName);
+		if (!nameValidation.ok) return { success: false, message: nameValidation.error };
+	}
+
+	if (paths.length > 0) {
+		const pathsValidation = validateSearchPaths(paths);
+		if (!pathsValidation.ok) return { success: false, message: pathsValidation.error };
+	}
 
 	if (!ephemeral) {
 		await ensureRefDir(cwd);
@@ -216,6 +236,13 @@ export async function addRepo(cwd: string, url: string, options: AddRepoOptions 
 
 export async function addFile(cwd: string, filePath: string, name?: string): Promise<{ success: boolean; message: string }> {
 	await ensureRefDir(cwd);
+
+	// Validate entry name if provided
+	if (name) {
+		const { validateEntryName } = await import("./validation");
+		const nameValidation = validateEntryName(name);
+		if (!nameValidation.ok) return { success: false, message: nameValidation.error };
+	}
 
 	const absPath = path.resolve(cwd, filePath);
 	if (!fs.existsSync(absPath)) {
