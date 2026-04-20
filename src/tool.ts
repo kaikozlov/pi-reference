@@ -1,11 +1,88 @@
 import * as fs from "node:fs";
+import * as path from "node:path";
 import { Type } from "@sinclair/typebox";
 import { StringEnum } from "@mariozechner/pi-ai";
-import { getRefDir, ensureRefDir, listReferenceTree } from "./helpers";
-import { generateIndex, setEntryMetadata } from "./index-gen";
+import { getRefDir, ensureRefDir, isGitRepo, runGit, formatSize } from "./helpers";
+import { generateIndex } from "./index-gen";
 import { addRepo, addFile, removeEntry } from "./entries";
 import { listCache, updateCacheEntry, updateAllCache, removeCacheEntry, clearCache, getCacheSize } from "./cache";
+import { readSidecar, updateSidecarField } from "./sidecar";
+import { setCacheDescription } from "./cache-meta";
 import type { RefState } from "./commands";
+
+// ─── Helper: build info response for an entry ────────────────────────
+
+function buildInfoText(
+	entryName: string,
+	cwd: string,
+	sidecar: Awaited<ReturnType<typeof readSidecar>>,
+): string {
+	const refDir = getRefDir(cwd);
+	const entryPath = path.join(refDir, entryName);
+	const parts: string[] = [];
+
+	// Header
+	parts.push(`# ${entryName}`);
+
+	// Sidecar frontmatter
+	if (sidecar) {
+		const fm = sidecar.frontmatter;
+		parts.push(`Type: ${fm.type}`);
+		if (fm.remote) parts.push(`Remote: ${fm.remote}`);
+		if (fm.description) parts.push(`Description: ${fm.description}`);
+		if (fm.relevance) parts.push(`Relevance: ${fm.relevance}`);
+	} else {
+		parts.push("(No sidecar found)");
+	}
+
+	// Git-specific metadata
+	if (fs.existsSync(entryPath) && isGitRepo(entryPath)) {
+		const branch = runGit(["branch", "--show-current"], entryPath);
+		const log = runGit(["log", "-1", "--oneline"], entryPath);
+		if (branch.code === 0 && branch.stdout) parts.push(`Branch: ${branch.stdout}`);
+		if (log.code === 0 && log.stdout) parts.push(`Last commit: ${log.stdout}`);
+	}
+
+	// Shallow top-level contents
+	if (fs.existsSync(entryPath)) {
+		const stat = fs.lstatSync(entryPath);
+		if (stat.isDirectory()) {
+			try {
+				const contents = fs.readdirSync(entryPath)
+					.filter((n) => n !== ".git")
+					.sort()
+					.slice(0, 20);
+				if (contents.length > 0) {
+					parts.push("");
+					parts.push("Contents:");
+					for (const name of contents) {
+						const full = path.join(entryPath, name);
+						try {
+							const isDir = fs.statSync(full).isDirectory();
+							parts.push(`  ${name}${isDir ? "/" : ""}`);
+						} catch {
+							parts.push(`  ${name}`);
+						}
+					}
+					const total = fs.readdirSync(entryPath).filter((n) => n !== ".git").length;
+					if (total > 20) parts.push(`  ... and ${total - 20} more`);
+				}
+			} catch { /* skip */ }
+		} else {
+			parts.push(`Size: ${formatSize(stat.size)}`);
+		}
+	}
+
+	// Sidecar body
+	if (sidecar && sidecar.body) {
+		parts.push("");
+		parts.push("---");
+		parts.push("");
+		parts.push(sidecar.body);
+	}
+
+	return parts.join("\n");
+}
 
 // ─── Tool definition ─────────────────────────────────────────────────
 
@@ -15,23 +92,27 @@ export function registerRefTool(pi: any, state: RefState) {
 		label: "Reference",
 		description:
 			"Manage the REFERENCE/ directory. " +
-			"Actions: 'init' (create dir), 'list' (show tree), 'add' (clone repo or copy file), " +
-			"'remove' (delete entry), 'update_index' (regenerate index), " +
-			"'describe' (set entry description), 'relevance' (set project relevance), " +
+			"Actions: 'init' (create dir), 'list' (show entries), 'info' (examine entry in detail), " +
+			"'add' (clone repo or copy file), 'remove' (delete entry), " +
+			"'update_index' (regenerate index), 'describe' (set entry description, syncs to cache), " +
+			"'relevance' (set project relevance, local only), " +
 			"'cache_list' (show cached repos), 'cache_update' (pull latest for cached repos), " +
 			"'cache_remove' (delete from cache), 'cache_clear' (clear entire cache).",
 		promptSnippet: "Manage reference materials (repos, files) in REFERENCE/",
 		promptGuidelines: [
 			"Use the ref tool when the user wants to add, list, or remove reference materials.",
+			"Use `ref info <name>` to examine an entry in detail before working with it.",
 			"Always update the index after adding or removing entries.",
 			"Clone repos into REFERENCE/ when the user wants to reference external code.",
 			"Non-git content works too: directories with docs, plans, markdown, any files.",
+			"Sidecars at REFERENCE/sidecar/<name>.md — update descriptions and notes with `edit`.",
 		],
 		parameters: Type.Object({
 			action: StringEnum(
 				[
 					"init",
 					"list",
+					"info",
 					"add",
 					"remove",
 					"update_index",
@@ -46,17 +127,12 @@ export function registerRefTool(pi: any, state: RefState) {
 			target: Type.Optional(
 				Type.String({
 					description:
-						"Git URL or local file path (for 'add'), entry name (for 'remove', 'describe', 'relevance', 'cache_remove', 'cache_update')",
+						"Git URL or local file path (for 'add'), entry name (for 'info', 'remove', 'describe', 'relevance', 'cache_remove', 'cache_update')",
 				}),
 			),
 			text: Type.Optional(
 				Type.String({
 					description: "Text content for 'describe' or 'relevance' actions",
-				}),
-			),
-			depth: Type.Optional(
-				Type.Number({
-					description: "Max depth for 'list' tree (default: 3 for index, unlimited for list command)",
 				}),
 			),
 		}),
@@ -74,19 +150,32 @@ export function registerRefTool(pi: any, state: RefState) {
 				}
 
 				case "list": {
+					state.indexContent = await generateIndex(ctx.cwd);
+					return {
+						content: [{ type: "text", text: state.indexContent }],
+						details: { action: "list" },
+					};
+				}
+
+				case "info": {
+					if (!params.target) {
+						throw new Error("'target' (entry name) is required for 'info' action");
+					}
 					const refDir = getRefDir(ctx.cwd);
-					if (!fs.existsSync(refDir)) {
+					const entryPath = path.join(refDir, params.target);
+					if (!fs.existsSync(entryPath)) {
 						return {
-							content: [
-								{ type: "text", text: "REFERENCE/ directory does not exist. Use action 'init' to create it." },
-							],
-							details: { action: "list", entries: [] },
+							content: [{ type: "text", text: `Entry '${params.target}' not found in REFERENCE/.` }],
+							details: { action: "info", found: false },
 						};
 					}
-					const tree = listReferenceTree(ctx.cwd, params.depth ?? Infinity);
+
+					const sidecar = await readSidecar(ctx.cwd, params.target);
+					const info = buildInfoText(params.target, ctx.cwd, sidecar);
+
 					return {
-						content: [{ type: "text", text: tree }],
-						details: { action: "list" },
+						content: [{ type: "text", text: info }],
+						details: { action: "info", entry: params.target },
 					};
 				}
 
@@ -149,9 +238,15 @@ export function registerRefTool(pi: any, state: RefState) {
 					if (!params.target || !params.text) {
 						throw new Error("'target' (entry name) and 'text' (description) are required for 'describe'");
 					}
-					state.indexContent = await setEntryMetadata(ctx.cwd, params.target, "description", params.text);
+					// Write-through: sidecar + cache-meta
+					await updateSidecarField(ctx.cwd, params.target, { description: params.text });
+					const sidecar = await readSidecar(ctx.cwd, params.target);
+					if (sidecar?.frontmatter.type === "git" && sidecar.frontmatter.remote) {
+						await setCacheDescription(params.target, params.text);
+					}
+					state.indexContent = await generateIndex(ctx.cwd);
 					return {
-						content: [{ type: "text", text: `Description set for ${params.target}` }],
+						content: [{ type: "text", text: `Description set for ${params.target} (synced to cache)` }],
 						details: { action: "describe", entry: params.target },
 					};
 				}
@@ -160,7 +255,9 @@ export function registerRefTool(pi: any, state: RefState) {
 					if (!params.target || !params.text) {
 						throw new Error("'target' (entry name) and 'text' (relevance) are required for 'relevance'");
 					}
-					state.indexContent = await setEntryMetadata(ctx.cwd, params.target, "relevance", params.text);
+					// Sidecar only — project-local
+					await updateSidecarField(ctx.cwd, params.target, { relevance: params.text });
+					state.indexContent = await generateIndex(ctx.cwd);
 					return {
 						content: [{ type: "text", text: `Project relevance set for ${params.target}` }],
 						details: { action: "relevance", entry: params.target },

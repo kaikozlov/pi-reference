@@ -5,23 +5,21 @@
  * relevant to the current work: reference repos, files, markdown research, etc.
  *
  * Features:
- * - Auto-injects REFERENCE_INDEX.md contents into the system prompt
- * - Commands: /reference init, list, add, remove, index, describe, cache
- * - LLM tool: `ref` for programmatic access
- * - Shared clone cache at ~/.pi/reference/cache/ to avoid re-cloning
- *
- * Usage:
- * 1. Place in ~/.pi/agent/extensions/pi-reference/ or .pi/extensions/pi-reference/
- * 2. Use /reference init to set up
- * 3. Use /reference add <url> to clone repos or copy files
+ * - Slim system prompt injection with flat entry manifest from sidecars
+ * - Commands: /reference init, list, add, remove, index, describe, relevance, cache
+ * - LLM tool: `ref` for programmatic access, including `info` for deep inspection
+ * - Sidecar files (REFERENCE/sidecar/<name>.md) with YAML frontmatter for metadata
+ * - Shared clone cache at ~/.pi/reference/cache/ with write-through description sync
+ * - Proactive description seeding via GitHub API on add
  */
 
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { getRefDir, getIndexFile } from "./src/helpers";
-import { generateIndex } from "./src/index-gen";
+import { generateIndex, generateManifest } from "./src/index-gen";
 import {
+	handleHelp,
 	handleInit,
 	handleList,
 	handleAdd,
@@ -30,22 +28,12 @@ import {
 	handleDescribe,
 	handleRelevance,
 	handleCache,
+	setAutocompleteCwd,
+	getArgumentCompletions,
+	parseArgs,
 	type RefState,
 } from "./src/commands";
 import { registerRefTool } from "./src/tool";
-
-// ─── Subcommand list ─────────────────────────────────────────────────
-
-const SUBCOMMANDS = [
-	"init",
-	"list",
-	"add",
-	"remove",
-	"index",
-	"describe",
-	"relevance",
-	"cache",
-];
 
 // ─── Extension ───────────────────────────────────────────────────────
 
@@ -58,6 +46,7 @@ export default function referenceExtension(pi: ExtensionAPI) {
 	// ─── Session lifecycle ──────────────────────────────────────────
 
 	pi.on("session_start", async (_event, ctx) => {
+		setAutocompleteCwd(ctx.cwd);
 		const refDir = getRefDir(ctx.cwd);
 		state.refInitialized = fs.existsSync(refDir);
 
@@ -88,13 +77,20 @@ This project uses a \`REFERENCE/\` directory in the repo root to collect referen
 **Important:** Never do coding work inside \`REFERENCE/\`. The most that should happen there is adding debug logging to compare against a reference implementation.
 `);
 
-		if (state.refInitialized && state.indexContent) {
-			additions.push("### Reference Index\n");
-			additions.push(state.indexContent);
-			additions.push(
-				"\nUse the `ref` tool or `/reference` commands to manage these materials. " +
-				"Use `ref` action `list` with `depth` to explore subdirectories in detail.",
-			);
+		if (state.refInitialized) {
+			const manifest = await generateManifest(event.cwd ?? "");
+			if (manifest) {
+				additions.push("### Reference entries");
+				additions.push("```");
+				additions.push(manifest);
+				additions.push("```");
+				additions.push(
+					"Use `ref info <name>` to examine an entry in detail.",
+				);
+				additions.push(
+					"Sidecars at `REFERENCE/sidecar/<name>.md` — update descriptions and notes with `edit`.",
+				);
+			}
 		}
 
 		if (additions.length > 0) {
@@ -108,58 +104,43 @@ This project uses a \`REFERENCE/\` directory in the repo root to collect referen
 
 	pi.registerCommand("reference", {
 		description: "Manage the REFERENCE/ directory",
-		getArgumentCompletions: (prefix: string) => {
-			const filtered = SUBCOMMANDS.filter((s) => s.startsWith(prefix));
-			return filtered.length > 0 ? filtered.map((s) => ({ value: s, label: s })) : null;
-		},
+		getArgumentCompletions,
 		handler: async (args, ctx) => {
-			const parts = args.trim().split(/\s+/);
-			const sub = parts[0] || "";
-			const rest = parts.slice(1).join(" ");
+			const { cmd: sub, rest } = parseArgs(args);
 
 			switch (sub) {
 				case "init":
 					await handleInit(ctx, state);
 					break;
 				case "list":
-					await handleList(ctx, rest);
+					await handleList(ctx, state);
 					break;
 				case "add":
 					await handleAdd(ctx, rest, state);
 					break;
 				case "remove":
-					await handleRemove(ctx, parts[1] || "", state);
+					await handleRemove(ctx, rest, state);
 					break;
 				case "index":
-					await handleIndex(ctx, rest, state);
+					await handleIndex(ctx, state);
 					break;
-				case "describe":
-					await handleDescribe(ctx, parts[1] || "", parts.slice(2).join(" "), state);
+				case "describe": {
+					const dParts = rest.split(/\s+/);
+					await handleDescribe(ctx, dParts[0] || "", dParts.slice(1).join(" "), state);
 					break;
-				case "relevance":
-					await handleRelevance(ctx, parts[1] || "", parts.slice(2).join(" "), state);
+				}
+				case "relevance": {
+					const rParts = rest.split(/\s+/);
+					await handleRelevance(ctx, rParts[0] || "", rParts.slice(1).join(" "), state);
 					break;
-				case "cache":
-					await handleCache(ctx, parts[1] || "", parts.slice(2).join(" "), state);
+				}
+				case "cache": {
+					const cParts = rest.split(/\s+/);
+					await handleCache(ctx, cParts[0] || "", cParts.slice(1).join(" "), state);
 					break;
+				}
 				default:
-					ctx.ui.notify(
-						"Usage: /reference <command> [args]\n" +
-						"\n" +
-						"  init                    Create REFERENCE/ dir and git exclude\n" +
-						"  list [depth]            Show contents of REFERENCE/ (default: full tree)\n" +
-						"  add <url|path> [--as name]   Clone repo or copy file/dir into REFERENCE/\n" +
-						"  remove <name>           Remove an entry from REFERENCE/\n" +
-						"  index [name]            Regenerate index (or refresh a single entry)\n" +
-						"  describe <name> <text>  Set description for an entry\n" +
-						"  relevance <name> <text> Set project relevance for an entry\n" +
-						"\n" +
-						"  cache list              Show cached repos (~/.pi/reference/cache/)\n" +
-						"  cache update [name]     Pull latest for cached repos (or one repo)\n" +
-						"  cache remove <name>     Remove a repo from the cache\n" +
-						"  cache clear             Clear the entire cache",
-						"info",
-					);
+					await handleHelp(ctx);
 			}
 		},
 	});

@@ -3,6 +3,8 @@ import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { CACHE_DIR } from "./constants";
 import { getRefDir, ensureRefDir, isGitRepo, runGit, extractRepoName } from "./helpers";
+import { createSidecar, deleteSidecar, type SidecarFrontmatter } from "./sidecar";
+import { getCacheMetaEntry, setCacheRemote, seedDescription } from "./cache-meta";
 
 // ─── Add entries ─────────────────────────────────────────────────────
 
@@ -28,13 +30,41 @@ export async function addRepo(cwd: string, url: string, name?: string): Promise<
 		runGit(["pull"], cachePath);
 	}
 
+	// Record remote in cache meta
+	await setCacheRemote(repoName, url);
+
+	let linked = false;
 	try {
 		await fsp.symlink(cachePath, targetPath);
-		return { success: true, message: `Added ${repoName} (linked from cache)` };
+		linked = true;
 	} catch {
 		await fsp.cp(cachePath, targetPath, { recursive: true });
-		return { success: true, message: `Added ${repoName} (copied from cache)` };
 	}
+
+	// Proactively seed description
+	const cacheEntry = await getCacheMetaEntry(repoName);
+	let description = cacheEntry?.description;
+
+	if (!description) {
+		description = (await seedDescription(url, cachePath)) ?? undefined;
+	}
+
+	// Create sidecar
+	const fm: SidecarFrontmatter = {
+		entry: repoName,
+		type: "git",
+		remote: url,
+		description,
+	};
+	await createSidecar(cwd, repoName, fm);
+
+	// If we got a description, write it back to cache meta for future projects
+	if (description) {
+		const { setCacheDescription } = await import("./cache-meta");
+		await setCacheDescription(repoName, description);
+	}
+
+	return { success: true, message: `Added ${repoName} (${linked ? "linked from cache" : "copied from cache"})` };
 }
 
 export async function addFile(cwd: string, filePath: string, name?: string): Promise<{ success: boolean; message: string }> {
@@ -59,6 +89,13 @@ export async function addFile(cwd: string, filePath: string, name?: string): Pro
 		await fsp.copyFile(absPath, targetPath);
 	}
 
+	// Create sidecar
+	const fm: SidecarFrontmatter = {
+		entry: targetName,
+		type: stat.isDirectory() ? "directory" : "file",
+	};
+	await createSidecar(cwd, targetName, fm);
+
 	return { success: true, message: `Added ${targetName} to REFERENCE/` };
 }
 
@@ -78,6 +115,9 @@ export async function removeEntry(cwd: string, name: string): Promise<{ success:
 	} else {
 		await fsp.unlink(targetPath);
 	}
+
+	// Remove sidecar
+	await deleteSidecar(cwd, name);
 
 	return { success: true, message: `Removed ${name} from REFERENCE/` };
 }
