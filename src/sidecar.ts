@@ -8,10 +8,16 @@ import { getRefDir } from "./helpers";
 
 export interface SidecarFrontmatter {
 	entry: string;
-	type: "git" | "directory" | "file";
+	type: "git" | "directory" | "file" | "npm";
 	remote?: string;
+	branch?: string;
+	searchPaths?: string[];
+	npmPackage?: string;
+	npmVersion?: string;
+	ephemeral?: boolean;
 	description?: string;
 	relevance?: string;
+	notes?: string;
 }
 
 // ─── Path helpers ────────────────────────────────────────────────────
@@ -39,8 +45,16 @@ function generateFrontmatter(fm: SidecarFrontmatter): string {
 	lines.push(`entry: ${escapeYamlValue(fm.entry)}`);
 	lines.push(`type: ${fm.type}`);
 	if (fm.remote) lines.push(`remote: ${escapeYamlValue(fm.remote)}`);
+	if (fm.branch) lines.push(`branch: ${escapeYamlValue(fm.branch)}`);
+	if (fm.searchPaths && fm.searchPaths.length > 0) {
+		lines.push(`searchPaths: [${fm.searchPaths.map((p) => `"${p}"`).join(", ")}]`);
+	}
+	if (fm.npmPackage) lines.push(`npmPackage: ${escapeYamlValue(fm.npmPackage)}`);
+	if (fm.npmVersion) lines.push(`npmVersion: ${escapeYamlValue(fm.npmVersion)}`);
+	if (fm.ephemeral) lines.push(`ephemeral: true`);
 	if (fm.description) lines.push(`description: ${escapeYamlValue(fm.description)}`);
 	if (fm.relevance) lines.push(`relevance: ${escapeYamlValue(fm.relevance)}`);
+	if (fm.notes) lines.push(`notes: ${escapeYamlValue(fm.notes)}`);
 	lines.push("---");
 	return lines.join("\n");
 }
@@ -59,6 +73,25 @@ function parseFrontmatter(content: string): { frontmatter: SidecarFrontmatter; b
 		const key = line.slice(0, colonIdx).trim();
 		let value: string = line.slice(colonIdx + 1).trim();
 
+		// Handle boolean values
+		if (value === "true") {
+			(fm as any)[key] = true;
+			continue;
+		} else if (value === "false") {
+			(fm as any)[key] = false;
+			continue;
+		}
+
+		// Handle array values like ["a", "b"]
+		if (value.startsWith("[") && value.endsWith("]")) {
+			try {
+				(fm as any)[key] = JSON.parse(value);
+				continue;
+			} catch {
+				// fall through to string parsing
+			}
+		}
+
 		// Strip surrounding quotes
 		if (
 			(value.startsWith('"') && value.endsWith('"')) ||
@@ -67,7 +100,11 @@ function parseFrontmatter(content: string): { frontmatter: SidecarFrontmatter; b
 			value = value.slice(1, -1);
 		}
 
-		if (key === "entry" || key === "type" || key === "remote" || key === "description" || key === "relevance") {
+		const validKeys = [
+			"entry", "type", "remote", "branch", "searchPaths", "description",
+			"relevance", "notes", "npmPackage", "npmVersion", "ephemeral",
+		];
+		if (validKeys.includes(key)) {
 			(fm as any)[key] = value || undefined;
 		}
 	}
@@ -129,7 +166,7 @@ export async function readSidecar(
 export async function updateSidecarField(
 	cwd: string,
 	entryName: string,
-	updates: Partial<Pick<SidecarFrontmatter, "description" | "relevance">>,
+	updates: Partial<Pick<SidecarFrontmatter, "description" | "relevance" | "notes" | "branch" | "searchPaths" | "ephemeral" | "npmPackage" | "npmVersion">>,
 ): Promise<void> {
 	const existing = await readSidecar(cwd, entryName);
 

@@ -1,38 +1,183 @@
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
-import { CACHE_DIR } from "./constants";
+import { CACHE_DIR, BRANCH_FALLBACKS } from "./constants";
 import { getRefDir, ensureRefDir, isGitRepo, runGit, extractRepoName } from "./helpers";
 import { createSidecar, deleteSidecar, type SidecarFrontmatter } from "./sidecar";
-import { getCacheMetaEntry, setCacheRemote, seedDescription } from "./cache-meta";
+import { getCacheMetaEntry, setCacheRemote, setCacheBranch, setCacheSearchPaths, seedDescription } from "./cache-meta";
 
 // ─── Add entries ─────────────────────────────────────────────────────
 
-export async function addRepo(cwd: string, url: string, name?: string): Promise<{ success: boolean; message: string }> {
-	await ensureRefDir(cwd);
+function isBranchNotFoundError(stderr: string): boolean {
+	return /could not find remote ref/i.test(stderr)
+		|| /Remote branch .* not found/i.test(stderr)
+		|| /fatal: invalid refspec/i.test(stderr)
+		|| /error: pathspec .* did not match any/i.test(stderr)
+		|| /Repository not found/i.test(stderr)
+		|| /fatal: repository .* not found/i.test(stderr);
+}
 
-	const repoName = name || extractRepoName(url);
-	const cachePath = path.join(CACHE_DIR, repoName);
+function gitClone(url: string, target: string, branch?: string): { code: number; stderr: string } {
+	const args = branch
+		? ["clone", "-b", branch, url, target]
+		: ["clone", url, target];
+	const result = runGit(args);
+	return { code: result.code, stderr: result.stderr };
+}
+
+function gitSparseClone(url: string, target: string, paths: string[], branch?: string): { code: number; stderr: string } {
+	// Clone with sparse checkout support
+	const cloneArgs = [
+		"clone", "--filter=blob:none", "--no-checkout", "--sparse",
+		...(branch ? ["-b", branch] : []),
+		url, target,
+	];
+	const cloneResult = runGit(cloneArgs);
+	if (cloneResult.code !== 0) return { code: cloneResult.code, stderr: cloneResult.stderr };
+
+	// Set sparse checkout paths
+	const sparseResult = runGit(["sparse-checkout", "set", ...paths], target);
+	if (sparseResult.code !== 0) return { code: sparseResult.code, stderr: sparseResult.stderr };
+
+	// Checkout
+	const checkoutResult = runGit(["checkout"], target);
+	return { code: checkoutResult.code, stderr: checkoutResult.stderr };
+}
+
+export interface AddRepoOptions {
+	name?: string;
+	branch?: string;
+	paths?: string[];
+	ephemeral?: boolean;
+}
+
+export async function addRepo(cwd: string, url: string, options: AddRepoOptions = {}): Promise<{ success: boolean; message: string }> {
+	const { name: optName, branch: optBranch, paths = [], ephemeral = false } = options;
+
+	if (!ephemeral) {
+		await ensureRefDir(cwd);
+	}
+
+	const repoName = optName || extractRepoName(url);
 	const targetPath = path.join(getRefDir(cwd), repoName);
 
 	if (fs.existsSync(targetPath)) {
 		return { success: false, message: `${repoName} already exists in REFERENCE/` };
 	}
 
-	if (!fs.existsSync(cachePath)) {
-		await fsp.mkdir(CACHE_DIR, { recursive: true });
-		const result = runGit(["clone", url, cachePath]);
-		if (result.code !== 0) {
-			return { success: false, message: `Clone failed: ${result.stderr}` };
+	// For ephemeral entries, clone directly into REFERENCE/ without cache
+	if (ephemeral) {
+		await fsp.mkdir(path.dirname(targetPath), { recursive: true });
+
+		let usedBranch = optBranch;
+		let lastError = "";
+
+		// Try specified branch, then fallbacks
+		const branchesToTry = optBranch
+			? [optBranch]
+			: [...BRANCH_FALLBACKS];
+
+		for (const branch of branchesToTry) {
+			// Clean up failed attempt
+			if (fs.existsSync(targetPath)) {
+				await fsp.rm(targetPath, { recursive: true });
+			}
+
+			const result = paths.length > 0
+				? gitSparseClone(url, targetPath, paths, branch)
+				: gitClone(url, targetPath, branch);
+
+			if (result.code === 0) {
+				usedBranch = branch;
+				break;
+			}
+
+			lastError = result.stderr;
+			if (!isBranchNotFoundError(result.stderr)) break; // Only retry on branch-not-found
 		}
-	} else {
-		runGit(["fetch", "--all"], cachePath);
-		runGit(["pull"], cachePath);
+
+		if (!fs.existsSync(targetPath) || !isGitRepo(targetPath)) {
+			return { success: false, message: `Clone failed: ${lastError}` };
+		}
+
+		// Create minimal sidecar
+		const fm: SidecarFrontmatter = {
+			entry: repoName,
+			type: "git",
+			remote: url,
+			branch: usedBranch,
+			searchPaths: paths.length > 0 ? paths : undefined,
+			ephemeral: true,
+		};
+		await createSidecar(cwd, repoName, fm);
+
+		return { success: true, message: `Added ${repoName} (ephemeral, not cached)` };
 	}
 
-	// Record remote in cache meta
-	await setCacheRemote(repoName, url);
+	// Cached path
+	const cachePath = path.join(CACHE_DIR, repoName);
 
+	if (!fs.existsSync(cachePath)) {
+		await fsp.mkdir(CACHE_DIR, { recursive: true });
+
+		let usedBranch = optBranch;
+		let lastError = "";
+
+		// Try specified branch, then fallbacks
+		const branchesToTry = optBranch
+			? [optBranch]
+			: [...BRANCH_FALLBACKS];
+
+		for (const branch of branchesToTry) {
+			// Clean up failed attempt
+			if (fs.existsSync(cachePath)) {
+				await fsp.rm(cachePath, { recursive: true });
+			}
+
+			const result = paths.length > 0
+				? gitSparseClone(url, cachePath, paths, branch)
+				: gitClone(url, cachePath, branch);
+
+			if (result.code === 0) {
+				usedBranch = branch;
+				break;
+			}
+
+			lastError = result.stderr;
+			if (!isBranchNotFoundError(result.stderr)) break; // Only retry on branch-not-found
+		}
+
+		if (!fs.existsSync(cachePath) || !isGitRepo(cachePath)) {
+			return { success: false, message: `Clone failed: ${lastError}` };
+		}
+
+		// Record metadata in cache
+		await setCacheRemote(repoName, url);
+		if (usedBranch) await setCacheBranch(repoName, usedBranch);
+		if (paths.length > 0) await setCacheSearchPaths(repoName, paths);
+	} else {
+		// Cache hit — shallow update
+		const cachedMeta = await getCacheMetaEntry(repoName);
+		const branch = optBranch || cachedMeta?.branch || "main";
+		const cachedPaths = cachedMeta?.searchPaths;
+
+		// Shallow fetch + hard reset
+		const fetch = runGit(["fetch", "--depth", "1", "origin", branch], cachePath);
+		if (fetch.code === 0) {
+			runGit(["reset", "--hard", `origin/${branch}`], cachePath);
+		}
+
+		// Re-apply sparse checkout if needed
+		if (cachedPaths && cachedPaths.length > 0) {
+			runGit(["sparse-checkout", "set", ...cachedPaths], cachePath);
+		}
+
+		// Update metadata
+		if (!cachedMeta?.branch && branch) await setCacheBranch(repoName, branch);
+		if (!cachedMeta?.remote) await setCacheRemote(repoName, url);
+	}
+
+	// Symlink or copy from cache to REFERENCE/
 	let linked = false;
 	try {
 		await fsp.symlink(cachePath, targetPath);
@@ -54,6 +199,8 @@ export async function addRepo(cwd: string, url: string, name?: string): Promise<
 		entry: repoName,
 		type: "git",
 		remote: url,
+		branch: optBranch || cacheEntry?.branch,
+		searchPaths: paths.length > 0 ? paths : undefined,
 		description,
 	};
 	await createSidecar(cwd, repoName, fm);

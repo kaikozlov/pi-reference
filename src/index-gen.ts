@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
+import * as path from "node:path";
 import { INDEX_FILE } from "./constants";
 import { getRefDir, getIndexFile, formatSize } from "./helpers";
 import { readAllSidecars, type SidecarFrontmatter } from "./sidecar";
@@ -13,10 +14,17 @@ import { readAllSidecars, type SidecarFrontmatter } from "./sidecar";
  *   dirs       → directory
  */
 function formatSource(fm: SidecarFrontmatter, cwd: string): string {
+	if (fm.type === "npm" && fm.npmPackage) {
+		return `npm:${fm.npmPackage}${fm.npmVersion ? `@${fm.npmVersion}` : ""}`;
+	}
 	if (fm.type === "git" && fm.remote) {
 		// Extract owner/repo from URL
 		const match = fm.remote.match(/github\.com[/:]([^/]+\/[^/\s#?]+?)(?:\.git)?$/);
-		if (match) return `gh:${match[1]}`;
+		if (match) {
+			const branch = fm.branch ? `:${fm.branch}` : "";
+			const paths = fm.searchPaths && fm.searchPaths.length > 0 ? ` [${fm.searchPaths.join(", ")}]` : "";
+			return `gh:${match[1]}${branch}${paths}`;
+		}
 		return fm.remote;
 	}
 	if (fm.type === "file") {
@@ -40,7 +48,9 @@ function manifestLine(fm: SidecarFrontmatter, cwd: string): string {
 	const source = formatSource(fm, cwd);
 	const desc = fm.description ?? "_(no description)_";
 	const rel = fm.relevance ?? "_(no relevance set)_";
-	return `  ${fm.entry} — ${source} — ${desc} — ${rel}`;
+	const notes = fm.notes ? ` — ${fm.notes}` : "";
+	const ephemeral = fm.ephemeral ? " (temp)" : "";
+	return `  ${fm.entry} — ${source} — ${desc} — ${rel}${notes}${ephemeral}`;
 }
 
 // ─── Index generation ────────────────────────────────────────────────

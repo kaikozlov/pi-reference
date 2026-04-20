@@ -28,6 +28,7 @@ export const SUBCOMMANDS: readonly { name: string; description: string; takesEnt
 	{ name: "index", description: "Regenerate REFERENCE_INDEX.md" },
 	{ name: "describe", description: "Set description for an entry (syncs to cache)", takesEntry: true },
 	{ name: "relevance", description: "Set project relevance for an entry", takesEntry: true },
+	{ name: "notes", description: "Set agent notes for an entry", takesEntry: true },
 	{ name: "cache", description: "Manage the clone cache (~/.pi/reference/cache/)" },
 ];
 
@@ -193,11 +194,13 @@ export async function handleHelp(ctx: ExtensionContext) {
 		[
 			"  init                    Create REFERENCE/ dir and git exclude",
 			"  list                    Show entries in REFERENCE/",
-			"  add <url|path> [--as N] Clone repo or copy file/dir into REFERENCE/",
+			"  add <url|path> [flags]  Clone repo or copy file/dir into REFERENCE/",
+			"    Flags: --as NAME, --branch BRANCH, --path DIR, --temp",
 			"  remove <name>           Remove an entry from REFERENCE/",
 			"  index                   Regenerate REFERENCE_INDEX.md",
 			"  describe <name> <text>  Set description (syncs to cache)",
 			"  relevance <name> <text> Set project relevance (local only)",
+			"  notes <name> <text>     Set agent notes for an entry",
 			"",
 			"  cache list              Show cached repos (~/.pi/reference/cache/)",
 			"  cache update [name]     Pull latest for cached repos (or one repo)",
@@ -356,19 +359,48 @@ export async function handleList(ctx: ExtensionContext, state: RefState) {
 
 export async function handleAdd(ctx: ExtensionContext, input: string, state: RefState) {
 	if (!input) {
-		ctx.ui.notify("Usage: /reference add <git-url-or-local-path> [--as name]", "warning");
+		ctx.ui.notify("Usage: /reference add <git-url-or-local-path> [--as name] [--branch branch] [--path path] [--temp]", "warning");
 		return;
 	}
 
 	await ensureRefDir(ctx.cwd);
 
+	// Parse flags
 	let name: string | undefined;
+	let branch: string | undefined;
+	let paths: string[] = [];
+	let ephemeral = false;
 	let target = input;
-	const nameMatch = input.match(/^(.+?)\s+--as\s+(\S+)$/);
+
+	// Extract --as name
+	const nameMatch = target.match(/^(.+?)\s+--as\s+(\S+)/);
 	if (nameMatch) {
 		target = nameMatch[1];
 		name = nameMatch[2];
 	}
+
+	// Extract --branch/-b
+	const branchMatch = target.match(/^(.+?)\s+(?:--branch|-b)\s+(\S+)/);
+	if (branchMatch) {
+		target = branchMatch[1];
+		branch = branchMatch[2];
+	}
+
+	// Extract --path/-p (can be repeated)
+	const pathRegex = /\s+(?:--path|-p)\s+(\S+)/g;
+	let pathMatch;
+	while ((pathMatch = pathRegex.exec(target)) !== null) {
+		paths.push(pathMatch[1]);
+	}
+	target = target.replace(/\s+(?:--path|-p)\s+\S+/g, "");
+
+	// Extract --temp/-t
+	if (/\s+--(?:temp|ephemeral)\b/.test(target)) {
+		ephemeral = true;
+		target = target.replace(/\s+--(?:temp|ephemeral)\b/, "");
+	}
+
+	target = target.trim();
 
 	let result: { success: boolean; message: string };
 
@@ -378,10 +410,12 @@ export async function handleAdd(ctx: ExtensionContext, input: string, state: Ref
 		target.startsWith("git@") ||
 		target.startsWith("ssh://")
 	) {
-		result = await addRepo(ctx.cwd, target, name);
+		result = await addRepo(ctx.cwd, target, { name, branch, paths, ephemeral });
 	} else if (target.startsWith("git:")) {
 		const url = target.startsWith("git://") ? target : `https://github.com/${target.slice(4)}`;
-		result = await addRepo(ctx.cwd, url, name);
+		result = await addRepo(ctx.cwd, url, { name, branch, paths, ephemeral });
+	} else if (target.startsWith("npm:")) {
+		result = await addFile(ctx.cwd, target, name);
 	} else {
 		result = await addFile(ctx.cwd, target, name);
 	}
@@ -458,6 +492,26 @@ export async function handleRelevance(ctx: ExtensionContext, name: string, text:
 	await updateSidecarField(ctx.cwd, name, { relevance: text });
 	state.indexContent = await generateIndex(ctx.cwd);
 	ctx.ui.notify(`✓ Project relevance set for ${name}`, "info");
+}
+
+export async function handleNotes(ctx: ExtensionContext, name: string, text: string, state: RefState) {
+	if (!name || !text) {
+		const entries = listEntries(ctx.cwd);
+		ctx.ui.notify(
+			`Usage: /reference notes <name> <text>\nAvailable entries: ${entries.join(", ") || "(empty)"}`,
+			"info",
+		);
+		return;
+	}
+	if (!listEntries(ctx.cwd).includes(name)) {
+		ctx.ui.notify(`Entry '${name}' not found in REFERENCE/`, "error");
+		return;
+	}
+
+	// Sidecar only — project-local agent instructions
+	await updateSidecarField(ctx.cwd, name, { notes: text });
+	state.indexContent = await generateIndex(ctx.cwd);
+	ctx.ui.notify(`✓ Notes set for ${name}`, "info");
 }
 
 export async function handleCache(ctx: ExtensionContext, sub: string, rest: string, state: RefState) {

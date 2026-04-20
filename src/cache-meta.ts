@@ -10,6 +10,11 @@ import { extractRepoName } from "./helpers";
 export interface CacheMetaEntry {
 	description: string;
 	remote?: string;
+	branch?: string;
+	searchPaths?: string[];
+	type?: "git" | "npm";
+	npmPackage?: string;
+	npmVersion?: string;
 	updated: string; // ISO timestamp
 }
 
@@ -66,6 +71,30 @@ export async function setCacheRemote(name: string, remote: string): Promise<void
 		meta[name] = { description: "", updated: new Date().toISOString() };
 	}
 	meta[name].remote = remote;
+	await writeCacheMeta(meta);
+}
+
+/**
+ * Set the branch for a cached repo.
+ */
+export async function setCacheBranch(name: string, branch: string): Promise<void> {
+	const meta = await readCacheMeta();
+	if (!meta[name]) {
+		meta[name] = { description: "", updated: new Date().toISOString() };
+	}
+	meta[name].branch = branch;
+	await writeCacheMeta(meta);
+}
+
+/**
+ * Set the searchPaths for a cached repo.
+ */
+export async function setCacheSearchPaths(name: string, searchPaths: string[]): Promise<void> {
+	const meta = await readCacheMeta();
+	if (!meta[name]) {
+		meta[name] = { description: "", updated: new Date().toISOString() };
+	}
+	meta[name].searchPaths = searchPaths;
 	await writeCacheMeta(meta);
 }
 

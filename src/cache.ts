@@ -3,6 +3,7 @@ import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { CACHE_DIR } from "./constants";
 import { isGitRepo, runGit, formatSize, formatDirSize, getDirSize } from "./helpers";
+import { getCacheMetaEntry } from "./cache-meta";
 
 // ─── Cache management ────────────────────────────────────────────────
 
@@ -37,11 +38,46 @@ export async function updateCacheEntry(name: string): Promise<{ success: boolean
 	if (!isGitRepo(cachePath)) {
 		return { success: false, message: `${name} is not a git repo, nothing to update` };
 	}
-	const pull = runGit(["pull", "--ff-only"], cachePath);
-	if (pull.code !== 0) {
-		return { success: false, message: `Update failed: ${pull.stderr || pull.stdout}` };
+
+	// Read branch from cache meta, default to main
+	const meta = await getCacheMetaEntry(name);
+	const branch = meta?.branch || "main";
+
+	// Shallow fetch + hard reset
+	const fetch = runGit(["fetch", "--depth", "1", "origin", branch], cachePath);
+	if (fetch.code !== 0) {
+		// If the branch doesn't exist, try fallback branches
+		if (meta?.branch) {
+			// User-specified branch failed
+			return { success: false, message: `Update failed (branch ${branch}): ${fetch.stderr || fetch.stdout}` };
+		}
+		// Try common branches
+		const BRANCH_FALLBACKS = ["main", "master", "trunk", "dev"];
+		for (const fallback of BRANCH_FALLBACKS) {
+			const retry = runGit(["fetch", "--depth", "1", "origin", fallback], cachePath);
+			if (retry.code === 0) {
+				runGit(["reset", "--hard", `origin/${fallback}`], cachePath);
+				// Re-apply sparse checkout if needed
+				if (meta?.searchPaths && meta.searchPaths.length > 0) {
+					runGit(["sparse-checkout", "set", ...meta.searchPaths], cachePath);
+				}
+				return { success: true, message: `Updated ${name} (branch: ${fallback}): fetch+reset successful` };
+			}
+		}
+		return { success: false, message: `Update failed: ${fetch.stderr || fetch.stdout}` };
 	}
-	return { success: true, message: `Updated ${name}: ${pull.stdout || "already up to date"}` };
+
+	const reset = runGit(["reset", "--hard", `origin/${branch}`], cachePath);
+	if (reset.code !== 0) {
+		return { success: false, message: `Reset failed: ${reset.stderr || reset.stdout}` };
+	}
+
+	// Re-apply sparse checkout if configured
+	if (meta?.searchPaths && meta.searchPaths.length > 0) {
+		runGit(["sparse-checkout", "set", ...meta.searchPaths], cachePath);
+	}
+
+	return { success: true, message: `Updated ${name}: fetch+reset successful` };
 }
 
 export async function updateAllCache(): Promise<string[]> {

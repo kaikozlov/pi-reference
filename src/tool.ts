@@ -30,8 +30,13 @@ function buildInfoText(
 		const fm = sidecar.frontmatter;
 		parts.push(`Type: ${fm.type}`);
 		if (fm.remote) parts.push(`Remote: ${fm.remote}`);
+		if (fm.branch) parts.push(`Branch: ${fm.branch}`);
+		if (fm.searchPaths && fm.searchPaths.length > 0) parts.push(`Search paths: ${fm.searchPaths.join(", ")}`);
 		if (fm.description) parts.push(`Description: ${fm.description}`);
 		if (fm.relevance) parts.push(`Relevance: ${fm.relevance}`);
+		if (fm.notes) parts.push(`Notes: ${fm.notes}`);
+		if (fm.ephemeral) parts.push(`(ephemeral — not cached)`);
+		if (fm.npmPackage) parts.push(`npm: ${fm.npmPackage}${fm.npmVersion ? `@${fm.npmVersion}` : ""}`);
 	} else {
 		parts.push("(No sidecar found)");
 	}
@@ -40,7 +45,7 @@ function buildInfoText(
 	if (fs.existsSync(entryPath) && isGitRepo(entryPath)) {
 		const branch = runGit(["branch", "--show-current"], entryPath);
 		const log = runGit(["log", "-1", "--oneline"], entryPath);
-		if (branch.code === 0 && branch.stdout) parts.push(`Branch: ${branch.stdout}`);
+		if (branch.code === 0 && branch.stdout) parts.push(`Checked out: ${branch.stdout}`);
 		if (log.code === 0 && log.stdout) parts.push(`Last commit: ${log.stdout}`);
 	}
 
@@ -96,7 +101,7 @@ export function registerRefTool(pi: any, state: RefState) {
 			"Actions: 'init' (create dir), 'list' (show entries), 'info' (examine entry in detail), " +
 			"'add' (clone repo or copy file), 'remove' (delete entry), " +
 			"'update_index' (regenerate index), 'describe' (set entry description, syncs to cache), " +
-			"'relevance' (set project relevance, local only), " +
+			"'relevance' (set project relevance, local only), 'notes' (set agent notes), " +
 			"'cache_list' (show cached repos), 'cache_update' (pull latest for cached repos), " +
 			"'cache_remove' (delete from cache), 'cache_clear' (clear entire cache).",
 		promptSnippet: "Manage reference materials (repos, files) in REFERENCE/",
@@ -107,6 +112,9 @@ export function registerRefTool(pi: any, state: RefState) {
 			"Clone repos into REFERENCE/ when the user wants to reference external code.",
 			"Non-git content works too: directories with docs, plans, markdown, any files.",
 			"Sidecars at REFERENCE/sidecar/<name>.md — update descriptions and notes with `edit`.",
+			"Use paths param to clone only specific subdirectories (sparse checkout) for large repos.",
+			"Use branch param to specify a branch; otherwise main/master/trunk/dev are tried automatically.",
+			"Use ephemeral=true for one-off references that won't be cached.",
 		],
 		parameters: Type.Object({
 			action: StringEnum(
@@ -119,6 +127,7 @@ export function registerRefTool(pi: any, state: RefState) {
 					"update_index",
 					"describe",
 					"relevance",
+					"notes",
 					"cache_list",
 					"cache_update",
 					"cache_remove",
@@ -128,12 +137,27 @@ export function registerRefTool(pi: any, state: RefState) {
 			target: Type.Optional(
 				Type.String({
 					description:
-						"Git URL or local file path (for 'add'), entry name (for 'info', 'remove', 'describe', 'relevance', 'cache_remove', 'cache_update')",
+						"Git URL or local file path (for 'add'), entry name (for 'info', 'remove', 'describe', 'relevance', 'notes', 'cache_remove', 'cache_update')",
 				}),
 			),
 			text: Type.Optional(
 				Type.String({
-					description: "Text content for 'describe' or 'relevance' actions",
+					description: "Text content for 'describe', 'relevance', or 'notes' actions",
+				}),
+			),
+			branch: Type.Optional(
+				Type.String({
+					description: "Branch to clone (for 'add'). If not set, tries main/master/trunk/dev automatically.",
+				}),
+			),
+			paths: Type.Optional(
+				Type.Array(Type.String(), {
+					description: "Sparse checkout paths — subdirectories to include (for 'add'). Saves disk for large repos.",
+				}),
+			),
+			ephemeral: Type.Optional(
+				Type.Boolean({
+					description: "If true, clone without caching (for 'add'). Good for one-off references.",
 				}),
 			),
 		}),
@@ -193,6 +217,12 @@ export function registerRefTool(pi: any, state: RefState) {
 					}
 					await ensureRefDir(ctx.cwd);
 
+					const repoOpts = {
+						branch: params.branch as string | undefined,
+						paths: params.paths as string[] | undefined,
+						ephemeral: params.ephemeral as boolean | undefined,
+					};
+
 					let result: { success: boolean; message: string };
 					if (
 						params.target.startsWith("http://") ||
@@ -200,12 +230,14 @@ export function registerRefTool(pi: any, state: RefState) {
 						params.target.startsWith("git@") ||
 						params.target.startsWith("ssh://")
 					) {
-						result = await addRepo(ctx.cwd, params.target);
+						result = await addRepo(ctx.cwd, params.target, repoOpts);
 					} else if (params.target.startsWith("git:")) {
 						const url = params.target.startsWith("git://")
 							? params.target
 							: `https://github.com/${params.target.slice(4)}`;
-						result = await addRepo(ctx.cwd, url);
+						result = await addRepo(ctx.cwd, url, repoOpts);
+					} else if (params.target.startsWith("npm:")) {
+						result = await addFile(ctx.cwd, params.target);
 					} else {
 						result = await addFile(ctx.cwd, params.target);
 					}
@@ -269,6 +301,19 @@ export function registerRefTool(pi: any, state: RefState) {
 					return {
 						content: [{ type: "text", text: `Project relevance set for ${params.target}` }],
 						details: { action: "relevance", entry: params.target },
+					};
+				}
+
+				case "notes": {
+					if (!params.target || !params.text) {
+						throw new Error("'target' (entry name) and 'text' (notes) are required for 'notes'");
+					}
+					// Sidecar only — project-local agent instructions
+					await updateSidecarField(ctx.cwd, params.target, { notes: params.text });
+					state.indexContent = await generateIndex(ctx.cwd);
+					return {
+						content: [{ type: "text", text: `Notes set for ${params.target}` }],
+						details: { action: "notes", entry: params.target },
 					};
 				}
 

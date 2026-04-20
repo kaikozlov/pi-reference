@@ -27,6 +27,7 @@ import {
 	handleIndex,
 	handleDescribe,
 	handleRelevance,
+	handleNotes,
 	handleCache,
 	setAutocompleteCwd,
 	getArgumentCompletions,
@@ -132,6 +133,11 @@ This project uses a \`REFERENCE/\` directory in the repo root to collect referen
 				case "relevance": {
 					const rParts = rest.split(/\s+/);
 					await handleRelevance(ctx, rParts[0] || "", rParts.slice(1).join(" "), state);
+					break;
+				}
+				case "notes": {
+					const nParts = rest.split(/\s+/);
+					await handleNotes(ctx, nParts[0] || "", nParts.slice(1).join(" "), state);
 					break;
 				}
 				case "cache": {
