@@ -273,6 +273,144 @@ export async function addFile(cwd: string, filePath: string, name?: string): Pro
 	return { success: true, message: `Added ${targetName} to REFERENCE/` };
 }
 
+// ─── npm package entries ──────────────────────────────────────────────
+
+function parseNpmRef(ref: string): { pkg: string; version?: string } | null {
+	// npm:package@version or npm:package
+	const withoutPrefix = ref.startsWith("npm:") ? ref.slice(4) : ref;
+	if (!withoutPrefix) return null;
+
+	const lastAt = withoutPrefix.lastIndexOf("@");
+	if (lastAt > 0) {
+		// Scoped: @scope/pkg@version or regular: pkg@version
+		return { pkg: withoutPrefix.slice(0, lastAt), version: withoutPrefix.slice(lastAt + 1) };
+	}
+	return { pkg: withoutPrefix };
+}
+
+export async function addNpmPackage(cwd: string, ref: string, name?: string): Promise<{ success: boolean; message: string }> {
+	await ensureRefDir(cwd);
+
+	const parsed = parseNpmRef(ref);
+	if (!parsed) {
+		return { success: false, message: "Invalid npm reference. Use npm:<package> or npm:<package>@<version>" };
+	}
+
+	const { pkg, version } = parsed;
+	const targetName = name || pkg.replace("@", "").replace("/", "-");
+	const cachePath = path.join(CACHE_DIR, `npm-${targetName}`);
+	const targetPath = path.join(getRefDir(cwd), targetName);
+
+	if (fs.existsSync(targetPath)) {
+		return { success: false, message: `${targetName} already exists in REFERENCE/` };
+	}
+
+	// Validate name
+	const { validateEntryName } = await import("./validation");
+	const nameValidation = validateEntryName(targetName);
+	if (!nameValidation.ok) return { success: false, message: nameValidation.error };
+
+	// Download and extract npm package
+	await fsp.mkdir(CACHE_DIR, { recursive: true });
+
+	const packSpec = version ? `${pkg}@${version}` : pkg;
+	const tmpDir = path.join(CACHE_DIR, `.tmp-npm-${targetName}`);
+
+	try {
+		// Clean up any previous temp
+		if (fs.existsSync(tmpDir)) await fsp.rm(tmpDir, { recursive: true });
+		await fsp.mkdir(tmpDir, { recursive: true });
+
+		// npm pack to get the tarball
+		const packResult = Bun.spawnSync(["npm", "pack", packSpec, "--pack-destination", tmpDir], {
+			encoding: "utf-8",
+			timeout: 60_000,
+		});
+
+		if (packResult.status !== 0) {
+			return { success: false, message: `npm pack failed: ${packResult.stderr || "unknown error"}` };
+		}
+
+		// Find the tarball
+		const tmpFiles = fs.readdirSync(tmpDir);
+		const tarball = tmpFiles.find((f) => f.endsWith(".tgz"));
+		if (!tarball) {
+			return { success: false, message: "npm pack did not produce a tarball" };
+		}
+
+		// Clean up old cache if exists
+		if (fs.existsSync(cachePath)) {
+			await fsp.rm(cachePath, { recursive: true });
+		}
+
+		// Extract to cache dir
+		await fsp.mkdir(cachePath, { recursive: true });
+		const extractResult = Bun.spawnSync(["tar", "-xzf", path.join(tmpDir, tarball), "-C", cachePath], {
+			encoding: "utf-8",
+			timeout: 30_000,
+		});
+
+		if (extractResult.status !== 0) {
+			return { success: false, message: `tar extract failed: ${extractResult.stderr || "unknown error"}` };
+		}
+
+		// npm tarballs extract into a 'package/' subdirectory — move contents up
+		const packageDir = path.join(cachePath, "package");
+		if (fs.existsSync(packageDir)) {
+			const tmpMove = path.join(cachePath, ".tmp-move");
+			await fsp.rename(packageDir, tmpMove);
+			// Remove anything else in cachePath
+			for (const entry of fs.readdirSync(cachePath)) {
+				if (entry !== ".tmp-move") {
+					await fsp.rm(path.join(cachePath, entry), { recursive: true });
+				}
+			}
+			// Move contents up
+			for (const entry of fs.readdirSync(tmpMove)) {
+				await fsp.rename(path.join(tmpMove, entry), path.join(cachePath, entry));
+			}
+			await fsp.rm(tmpMove, { recursive: true });
+		}
+	} finally {
+		// Clean up temp
+		if (fs.existsSync(tmpDir)) await fsp.rm(tmpDir, { recursive: true });
+	}
+
+	// Symlink or copy from cache
+	let linked = false;
+	try {
+		await fsp.symlink(cachePath, targetPath);
+		linked = true;
+	} catch {
+		await fsp.cp(cachePath, targetPath, { recursive: true });
+	}
+
+	// Read package.json for description
+	let description: string | undefined;
+	try {
+		const pkgJson = JSON.parse(fs.readFileSync(path.join(cachePath, "package.json"), "utf-8"));
+		description = pkgJson.description;
+	} catch { /* skip */ }
+
+	// Create sidecar
+	const fm: SidecarFrontmatter = {
+		entry: targetName,
+		type: "npm",
+		npmPackage: pkg,
+		npmVersion: version,
+		description,
+	};
+	await createSidecar(cwd, targetName, fm);
+
+	// Update cache meta
+	const { setCacheDescription: setDesc } = await import("./cache-meta");
+	const meta = await import("./cache-meta");
+	await meta.setCacheRemote?.(targetName, `npm:${pkg}`);
+	if (description) await setDesc(targetName, description);
+
+	return { success: true, message: `Added ${targetName} (npm: ${packSpec}, ${linked ? "linked from cache" : "copied"})` };
+}
+
 // ─── Remove entries ──────────────────────────────────────────────────
 
 export async function removeEntry(cwd: string, name: string): Promise<{ success: boolean; message: string }> {

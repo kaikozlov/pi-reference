@@ -4,7 +4,7 @@ import { Type } from "@sinclair/typebox";
 import { StringEnum } from "@mariozechner/pi-ai";
 import { getRefDir, ensureRefDir, isGitRepo, runGit, formatSize } from "./helpers";
 import { generateIndex } from "./index-gen";
-import { addRepo, addFile, removeEntry } from "./entries";
+import { addRepo, addFile, addNpmPackage, removeEntry } from "./entries";
 import { listCache, updateCacheEntry, updateAllCache, removeCacheEntry, clearCache, getCacheSize } from "./cache";
 import { readSidecar, updateSidecarField } from "./sidecar";
 import { setCacheDescription } from "./cache-meta";
@@ -237,7 +237,7 @@ export function registerRefTool(pi: any, state: RefState) {
 							: `https://github.com/${params.target.slice(4)}`;
 						result = await addRepo(ctx.cwd, url, repoOpts);
 					} else if (params.target.startsWith("npm:")) {
-						result = await addFile(ctx.cwd, params.target);
+						result = await addNpmPackage(ctx.cwd, params.target);
 					} else {
 						result = await addFile(ctx.cwd, params.target);
 					}

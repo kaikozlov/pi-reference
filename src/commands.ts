@@ -5,7 +5,7 @@ import { fuzzyFilter, type AutocompleteItem } from "@mariozechner/pi-tui";
 import { getRefDir, listEntries, ensureRefDir, isGitRepo, runGit } from "./helpers";
 import { generateIndex } from "./index-gen";
 import { listCache, updateCacheEntry, updateAllCache, removeCacheEntry, clearCache, getCacheSize } from "./cache";
-import { addRepo, addFile, removeEntry } from "./entries";
+import { addRepo, addFile, addNpmPackage, removeEntry } from "./entries";
 import { CACHE_DIR, INDEX_FILE, SIDECAR_DIR } from "./constants";
 import { readSidecar, updateSidecarField, listSidecars, createSidecar, type SidecarFrontmatter } from "./sidecar";
 import { getCacheMetaEntry, setCacheDescription, seedDescription } from "./cache-meta";
@@ -415,7 +415,7 @@ export async function handleAdd(ctx: ExtensionContext, input: string, state: Ref
 		const url = target.startsWith("git://") ? target : `https://github.com/${target.slice(4)}`;
 		result = await addRepo(ctx.cwd, url, { name, branch, paths, ephemeral });
 	} else if (target.startsWith("npm:")) {
-		result = await addFile(ctx.cwd, target, name);
+		result = await addNpmPackage(ctx.cwd, target, name);
 	} else {
 		result = await addFile(ctx.cwd, target, name);
 	}
