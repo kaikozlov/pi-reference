@@ -8,6 +8,7 @@ import { addRepo, addFile, removeEntry } from "./entries";
 import { listCache, updateCacheEntry, updateAllCache, removeCacheEntry, clearCache, getCacheSize } from "./cache";
 import { readSidecar, updateSidecarField } from "./sidecar";
 import { setCacheDescription } from "./cache-meta";
+import { repairSidecars } from "./commands";
 import type { RefState } from "./commands";
 
 // ─── Helper: build info response for an entry ────────────────────────
@@ -141,11 +142,18 @@ export function registerRefTool(pi: any, state: RefState) {
 			switch (params.action) {
 				case "init": {
 					await ensureRefDir(ctx.cwd);
+					const { created, repaired, seeded } = await repairSidecars(ctx.cwd);
 					state.indexContent = await generateIndex(ctx.cwd);
 					state.refInitialized = true;
+
+					const parts = ["REFERENCE/ directory initialized."];
+					if (created > 0) parts.push(`Created ${created} new sidecar(s).`);
+					if (repaired > 0) parts.push(`Repaired ${repaired} sidecar(s) (type/remote).`);
+					if (seeded > 0) parts.push(`Seeded descriptions for ${seeded} entry/entries.`);
+
 					return {
-						content: [{ type: "text", text: "REFERENCE/ directory initialized and index generated." }],
-						details: { action: "init" },
+						content: [{ type: "text", text: parts.join(" ") }],
+						details: { action: "init", created, repaired, seeded },
 					};
 				}
 

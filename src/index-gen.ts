@@ -39,7 +39,7 @@ function formatSource(fm: SidecarFrontmatter, cwd: string): string {
 function manifestLine(fm: SidecarFrontmatter, cwd: string): string {
 	const source = formatSource(fm, cwd);
 	const desc = fm.description ?? "_(no description)_";
-	const rel = fm.relevance ?? "_(no relevance)_";
+	const rel = fm.relevance ?? "_(no relevance set)_";
 	return `  ${fm.entry} — ${source} — ${desc} — ${rel}`;
 }
 
@@ -79,7 +79,7 @@ export async function generateIndex(cwd: string): Promise<string> {
 			} else {
 				// Entry without a sidecar — barebones line
 				const isDir = fs.statSync(path.join(refDir, entry.name)).isDirectory();
-				lines.push(`  ${entry.name} — ${isDir ? "directory" : "file"} — _(no description)_ — _(no relevance)_`);
+				lines.push(`  ${entry.name} — ${isDir ? "directory" : "file"} — _(no description)_ — _(no relevance set)_`);
 			}
 		}
 	}
@@ -112,7 +112,7 @@ export async function generateManifest(cwd: string): Promise<string> {
 			lines.push(manifestLine(fm, cwd));
 		} else {
 			const isDir = fs.statSync(path.join(refDir, entry.name)).isDirectory();
-			lines.push(`  ${entry.name} — ${isDir ? "directory" : "file"} — _(no description)_ — _(no relevance)_`);
+			lines.push(`  ${entry.name} — ${isDir ? "directory" : "file"} — _(no description)_ — _(no relevance set)_`);
 		}
 	}
 	return lines.join("\n");

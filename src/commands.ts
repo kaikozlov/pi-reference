@@ -8,7 +8,7 @@ import { listCache, updateCacheEntry, updateAllCache, removeCacheEntry, clearCac
 import { addRepo, addFile, removeEntry } from "./entries";
 import { CACHE_DIR, INDEX_FILE, SIDECAR_DIR } from "./constants";
 import { readSidecar, updateSidecarField, listSidecars, createSidecar, type SidecarFrontmatter } from "./sidecar";
-import { setCacheDescription } from "./cache-meta";
+import { getCacheMetaEntry, setCacheDescription, seedDescription } from "./cache-meta";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -208,18 +208,25 @@ export async function handleHelp(ctx: ExtensionContext) {
 	);
 }
 
-export async function handleInit(ctx: ExtensionContext, state: RefState) {
-	const created = await ensureRefDir(ctx.cwd);
+/**
+ * Repair and seed sidecars: fix wrong types, missing remotes, and seed descriptions.
+ * Returns counts of created, repaired, and seeded sidecars.
+ */
+export async function repairSidecars(cwd: string): Promise<{ created: number; repaired: number; seeded: number }> {
+	const refDir = getRefDir(cwd);
+	if (!fs.existsSync(refDir)) return { created: 0, repaired: 0, seeded: 0 };
 
-	// Create sidecars for any entries that don't have one yet
-	const existingSidecars = new Set(listSidecars(ctx.cwd));
-	const entries = fs
-		.readdirSync(getRefDir(ctx.cwd), { withFileTypes: true })
-		.filter((e) => e.name !== INDEX_FILE && e.name !== ".git" && e.name !== SIDECAR_DIR && !existingSidecars.has(e.name));
+	const existingSidecars = new Set(listSidecars(cwd));
 
-	let migrated = 0;
-	for (const entry of entries) {
-		const entryPath = path.join(getRefDir(ctx.cwd), entry.name);
+	// Gather all filesystem entries (excluding index, .git, sidecar dir)
+	const fsEntries = fs
+		.readdirSync(refDir, { withFileTypes: true })
+		.filter((e) => e.name !== INDEX_FILE && e.name !== ".git" && e.name !== SIDECAR_DIR);
+
+	// Phase 1: Create sidecars for entries that don't have one yet
+	let created_count = 0;
+	for (const entry of fsEntries.filter((e) => !existingSidecars.has(e.name))) {
+		const entryPath = path.join(refDir, entry.name);
 		const isDir = fs.statSync(entryPath).isDirectory(); // follows symlinks
 		let type: "git" | "directory" | "file" = isDir ? "directory" : "file";
 		let remote: string | undefined;
@@ -231,9 +238,87 @@ export async function handleInit(ctx: ExtensionContext, state: RefState) {
 		}
 
 		const fm: SidecarFrontmatter = { entry: entry.name, type, remote };
-		await createSidecar(ctx.cwd, entry.name, fm);
-		migrated++;
+		await createSidecar(cwd, entry.name, fm);
+		created_count++;
 	}
+
+	// Phase 2: Repair existing sidecars with wrong types / missing remote
+	let repaired = 0;
+	for (const entryName of existingSidecars) {
+		const entryPath = path.join(refDir, entryName);
+		if (!fs.existsSync(entryPath)) continue;
+
+		const sidecar = await readSidecar(cwd, entryName);
+		if (!sidecar) continue;
+
+		const isDir = fs.statSync(entryPath).isDirectory();
+		const isGit = isDir && isGitRepo(entryPath);
+		let needsRepair = false;
+		const updates: Partial<SidecarFrontmatter> = {};
+
+		// Fix wrong type
+		const correctType: "git" | "directory" | "file" = isGit ? "git" : isDir ? "directory" : "file";
+		if (sidecar.frontmatter.type !== correctType) {
+			updates.type = correctType;
+			needsRepair = true;
+		}
+
+		// Seed missing remote for git repos
+		if (isGit && !sidecar.frontmatter.remote) {
+			const result = runGit(["remote", "get-url", "origin"], entryPath);
+			if (result.code === 0 && result.stdout) {
+				updates.remote = result.stdout;
+				needsRepair = true;
+			}
+		}
+
+		if (needsRepair) {
+			const fm: SidecarFrontmatter = {
+				entry: entryName,
+				type: updates.type ?? sidecar.frontmatter.type,
+				remote: updates.remote ?? sidecar.frontmatter.remote,
+				description: sidecar.frontmatter.description,
+				relevance: sidecar.frontmatter.relevance,
+			};
+			await createSidecar(cwd, entryName, fm, sidecar.body);
+			repaired++;
+		}
+	}
+
+	// Phase 3: Seed descriptions for git entries missing them
+	let seeded = 0;
+	for (const entry of fsEntries) {
+		const sidecar = await readSidecar(cwd, entry.name);
+		if (!sidecar || sidecar.frontmatter.description) continue;
+
+		if (sidecar.frontmatter.type === "git" && sidecar.frontmatter.remote) {
+			const entryPath = path.join(refDir, entry.name);
+
+			// Check cache-meta first
+			const cached = await getCacheMetaEntry(entry.name);
+			let desc = cached?.description;
+
+			if (!desc) {
+				desc = (await seedDescription(sidecar.frontmatter.remote, entryPath)) ?? undefined;
+			}
+
+			if (desc) {
+				await createSidecar(cwd, entry.name, {
+					...sidecar.frontmatter,
+					description: desc,
+				}, sidecar.body);
+				await setCacheDescription(entry.name, desc);
+				seeded++;
+			}
+		}
+	}
+
+	return { created: created_count, repaired, seeded };
+}
+
+export async function handleInit(ctx: ExtensionContext, state: RefState) {
+	const created = await ensureRefDir(ctx.cwd);
+	const { created: created_count, repaired, seeded } = await repairSidecars(ctx.cwd);
 
 	state.indexContent = await generateIndex(ctx.cwd);
 	state.refInitialized = true;
@@ -242,8 +327,14 @@ export async function handleInit(ctx: ExtensionContext, state: RefState) {
 	if (created) {
 		parts.push("✓ Created REFERENCE/ directory and added to .git/info/exclude");
 	}
-	if (migrated > 0) {
-		parts.push(`✓ Created sidecars for ${migrated} existing ${migrated === 1 ? "entry" : "entries"}`);
+	if (created_count > 0) {
+		parts.push(`✓ Created sidecars for ${created_count} new ${created_count === 1 ? "entry" : "entries"}`);
+	}
+	if (repaired > 0) {
+		parts.push(`✓ Repaired ${repaired} ${repaired === 1 ? "sidecar" : "sidecars"} (type/remote)`);
+	}
+	if (seeded > 0) {
+		parts.push(`✓ Seeded descriptions for ${seeded} ${seeded === 1 ? "entry" : "entries"}`);
 	}
 	if (parts.length === 0) {
 		parts.push("✓ REFERENCE/ directory already initialized. Index refreshed.");
