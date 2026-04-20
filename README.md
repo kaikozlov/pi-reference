@@ -13,7 +13,7 @@ REPO_ROOT/REFERENCE/--
 
 importantly: we do not do coding work INSIDE of the reference folder - the maximum that ever happens here is maybe adding debug logging to compare against in a reference repo if we're trying to copy some implementation.
 
-I usually just "mkdir -p REFERENCE" and then run "echo 'REFERENCE/' >> .git/info/exclude'
+I usually just "mkdir -p REFERENCE" and then run "echo 'REFERENCE/' >> .git/info/exclude"
 
 The pain points:
 - It's very manual. Every time, i have to create the dir, find the links to the repos, clone them, set up the whole show.
@@ -33,7 +33,7 @@ we might even load this index as part of the system message.
 
 we should probably have a general description that we generate on clone that we persist. and then a relevance section that is individualized to the project we're working on.
 
-3. has commands to easily init the reference dir, list contents of the reference dir to the user (not into context when the user runs it), allows easy adding and removal, allows calling the model to update the index on a per-entry or bulk basis. 
+3. has commands to easily init the reference dir, list contents of the reference dir to the user (not into context when the user runs it), allows easy adding and removal, allows calling the model to update the index on a per-entry or bulk basis.
 - /reference list
 - /reference add
 - /reference remove
@@ -46,35 +46,60 @@ we should probably have a general description that we generate on clone that we 
 
 ## Implementation
 
-The extension lives in `.pi/extensions/pi-reference/index.ts` and implements all of the above:
+The extension lives in `index.ts` and `src/` and implements all of the above:
 
 ### What it does
-- **System prompt injection** — On every turn, the extension injects info about REFERENCE/ and the full `REFERENCE_INDEX.md` into the system prompt, so the LLM always knows what reference materials are available.
-- **`REFERENCE_INDEX.md`** — Auto-generated tree listing of REFERENCE/ with per-entry metadata (git remote, last commit, file sizes) and description/relevance fields.
+- **System prompt injection** — On every turn, the extension injects info about REFERENCE/ and the full entry manifest into the system prompt, so the LLM always knows what reference materials are available.
+- **Sidecar files** — `REFERENCE/sidecar/<name>.md` with YAML frontmatter for metadata (description, relevance, notes, branch, search paths, etc.)
+- **`REFERENCE_INDEX.md`** — Auto-generated manifest from sidecar frontmatter.
 - **Shared clone cache** — Repos are cloned to `~/.pi/reference/cache/` once, then symlinked into each project's REFERENCE/. No re-cloning across projects.
+- **Sparse checkout** — `--path` flag clones only the subdirectories you need, saving disk space.
+- **Branch fallback** — If no branch specified, tries `main → master → trunk → dev` automatically.
+- **Shallow updates** — Cache updates use `git fetch --depth 1` + `git reset --hard` (fast, no conflicts).
+- **Input validation** — Git URLs, branch names, search paths, and entry names are validated before use.
 - **Git exclude** — Automatically adds `REFERENCE/` to `.git/info/exclude`.
+- **Proactive description seeding** — GitHub API + README fallback on clone.
 
 ### Non-git content
-The extension fully supports directories and files that aren't git repos — docs folders, plans, markdown, any files. They show up in the index with file counts, file type breakdowns (top 5 extensions), and sizes. Just `/reference add path/to/dir` and it gets picked up.
+The extension fully supports directories and files that aren't git repos — docs folders, plans, markdown, any files. They show up in the index with descriptions. Just `/reference add path/to/dir` and it gets picked up.
+
+### npm packages
+Add npm packages as reference sources:
+```
+/reference add npm:react@19 --as react-source
+/reference add npm:@types/node@22
+```
+Downloads via `npm pack`, extracts to cache, symlinks to REFERENCE/.
 
 ### Commands
 ```
 /reference init                        Create REFERENCE/ dir and git exclude
-/reference list [depth]               Show tree view of REFERENCE/ contents
-/reference add <url|path> [--as name]  Clone repo or copy file/dir
-/reference remove <name>              Remove an entry from REFERENCE/
-/reference index [name]               Regenerate index (or refresh one entry)
-/reference describe <name> <text>     Set description for an entry
-/reference relevance <name> <text>    Set project relevance for an entry
+/reference list                        Show manifest of REFERENCE/ entries
+/reference add <url|path> [flags]      Clone repo or copy file/dir
+  Flags:
+    --as NAME            Custom entry name
+    --branch BRANCH      Git branch to clone
+    --path DIR           Sparse checkout path (repeatable)
+    --temp               Ephemeral — not cached
+/reference remove <name>               Remove an entry from REFERENCE/
+/reference index                       Regenerate REFERENCE_INDEX.md
+/reference describe <name> <text>      Set description (syncs to cache)
+/reference relevance <name> <text>     Set project relevance (local only)
+/reference notes <name> <text>         Set agent notes (shown in manifest)
 
-/reference cache list                 Show cached repos (~/.pi/reference/cache/)
-/reference cache update [name]        Pull latest for cached repos (or one)
-/reference cache remove <name>        Remove a repo from the cache
-/reference cache clear                Clear the entire cache
+/reference cache list                  Show cached repos (~/.pi/reference/cache/)
+/reference cache update [name]         Pull latest for cached repos (or one)
+/reference cache remove <name>         Remove a repo from the cache
+/reference cache clear                 Clear the entire cache
 ```
 
 ### LLM Tool
-The `ref` tool is registered for the LLM with actions: `init`, `list`, `add`, `remove`, `update_index`, `describe`, `relevance`, `cache_list`, `cache_update`, `cache_remove`, `cache_clear`. The agent can proactively manage references during conversation.
+The `ref` tool is registered for the LLM with actions: `init`, `list`, `add`, `remove`, `update_index`, `describe`, `relevance`, `notes`, `info`, `cache_list`, `cache_update`, `cache_remove`, `cache_clear`. The agent can proactively manage references during conversation.
+
+**Additional params for `add`:**
+- `branch` — Specify a branch (tries main/master/trunk/dev if not set)
+- `paths` — Sparse checkout subdirectories
+- `ephemeral` — Skip caching for one-off references
 
 ### Installation
-The extension is auto-discovered from `.pi/extensions/pi-reference/` in the project root. Just run `pi` in this repo.
+The extension is auto-discovered from `index.ts` in this project root. Just run `pi` in this repo.
