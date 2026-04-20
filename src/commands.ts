@@ -5,7 +5,7 @@ import { generateIndex, setEntryMetadata } from "./index-gen";
 import { ensureRefDir } from "./helpers";
 import { listCache, updateCacheEntry, updateAllCache, removeCacheEntry, clearCache, getCacheSize } from "./cache";
 import { addRepo, addFile, removeEntry } from "./entries";
-import { CACHE_DIR } from "./constants";
+import { CACHE_DIR, DEFAULT_TREE_DEPTH, MAX_ITEMS_PER_DIR } from "./constants";
 
 // ─── Command handler types ───────────────────────────────────────────
 
@@ -36,12 +36,12 @@ export async function handleList(ctx: ExtensionContext, depthArg: string) {
 		return;
 	}
 
-	const depth = depthArg ? parseInt(depthArg, 10) : Infinity;
+	const depth = depthArg ? parseInt(depthArg, 10) : DEFAULT_TREE_DEPTH;
 	if (isNaN(depth) || depth < 0) {
 		ctx.ui.notify("Depth must be a non-negative number", "warning");
 		return;
 	}
-	const tree = listReferenceTree(ctx.cwd, depth);
+	const tree = listReferenceTree(ctx.cwd, depth, MAX_ITEMS_PER_DIR);
 
 	if (!ctx.hasUI) {
 		ctx.ui.notify(tree, "info");
