@@ -29,7 +29,8 @@ import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-age
 const REFERENCE_DIR = "REFERENCE";
 const INDEX_FILE = "REFERENCE_INDEX.md";
 const CACHE_DIR = path.join(os.homedir(), ".pi", "reference", "cache");
-const DEFAULT_TREE_DEPTH = 3;
+const DEFAULT_TREE_DEPTH = 2;
+const MAX_ITEMS_PER_DIR = 10; // show first N children, then "... and N more"
 
 // ─── Helpers ─────────────────────────────────────────────────────────
 
@@ -91,7 +92,7 @@ async function ensureRefDir(cwd: string): Promise<boolean> {
  * Generate a tree-like listing of the REFERENCE/ directory.
  * maxDepth controls how deep to recurse (Infinity = full tree).
  */
-function listReferenceTree(cwd: string, maxDepth: number = Infinity): string {
+function listReferenceTree(cwd: string, maxDepth: number = Infinity, maxItems: number = Infinity): string {
 	const refDir = getRefDir(cwd);
 	if (!fs.existsSync(refDir)) {
 		return "(REFERENCE/ directory does not exist. Run /reference init)";
@@ -102,8 +103,8 @@ function listReferenceTree(cwd: string, maxDepth: number = Infinity): string {
 	function walk(dir: string, prefix: string, depth: number) {
 		if (depth > maxDepth) return;
 
-		const entries = fs.readdirSync(dir, { withFileTypes: true });
-		const sorted = entries
+		let entries = fs.readdirSync(dir, { withFileTypes: true });
+		entries = entries
 			.filter((e) => e.name !== ".git")
 			.sort((a, b) => {
 				if (a.isDirectory() && !b.isDirectory()) return -1;
@@ -111,11 +112,15 @@ function listReferenceTree(cwd: string, maxDepth: number = Infinity): string {
 				return a.name.localeCompare(b.name);
 			});
 
-		for (let i = 0; i < sorted.length; i++) {
-			const entry = sorted[i];
-			const isLast = i === sorted.length - 1;
-			const connector = isLast ? "└── " : "├── ";
-			const childPrefix = isLast ? "    " : "│   ";
+		const truncated = maxItems > 0 && entries.length > maxItems;
+		const visible = truncated ? entries.slice(0, maxItems) : entries;
+		const remaining = truncated ? entries.length - maxItems : 0;
+
+		for (let i = 0; i < visible.length; i++) {
+			const entry = visible[i];
+			const isVisualLast = i === visible.length - 1 && !truncated;
+			const connector = isVisualLast ? "└── " : "├── ";
+			const childPrefix = isVisualLast ? "    " : "│   ";
 
 			if (entry.isDirectory()) {
 				if (depth === maxDepth) {
@@ -137,6 +142,10 @@ function listReferenceTree(cwd: string, maxDepth: number = Infinity): string {
 							: "";
 				lines.push(`${prefix}${connector}${entry.name}${sizeStr}`);
 			}
+		}
+
+		if (truncated) {
+			lines.push(`${prefix}└── ... and ${remaining} more`);
 		}
 	}
 
@@ -230,7 +239,7 @@ async function generateIndex(cwd: string, persistedMeta?: Map<string, EntryMetad
 		lines.push("## Contents");
 		lines.push("");
 		lines.push("```");
-		lines.push(listReferenceTree(cwd, DEFAULT_TREE_DEPTH));
+		lines.push(listReferenceTree(cwd, DEFAULT_TREE_DEPTH, MAX_ITEMS_PER_DIR));
 		lines.push("```");
 		lines.push("");
 
