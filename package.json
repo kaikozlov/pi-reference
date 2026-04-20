@@ -1,0 +1,10 @@
+{
+  "name": "pi-reference",
+  "version": "0.1.0",
+  "description": "Manage a REFERENCE/ directory for project context — repos, files, docs",
+  "keywords": ["pi-package"],
+  "private": true,
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}
