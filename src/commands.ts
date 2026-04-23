@@ -123,7 +123,8 @@ export function getArgumentCompletions(argumentPrefix: string): AutocompleteItem
 			return items.length ? items : null;
 		}
 
-		if (cacheSub.takesCacheEntry && cacheTail !== undefined) {
+		if (cacheSub.takesCacheEntry) {
+			if (!cacheTail) return null; // empty arg → let user submit to update all
 			const items = cacheEntrySuggestions(cacheSub.name, cacheTail);
 			return items.length ? items : null;
 		}
