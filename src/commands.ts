@@ -29,7 +29,7 @@ export const SUBCOMMANDS: readonly { name: string; description: string; takesEnt
 	{ name: "describe", description: "Set description for an entry (syncs to cache)", takesEntry: true },
 	{ name: "relevance", description: "Set project relevance for an entry", takesEntry: true },
 	{ name: "notes", description: "Set agent notes for an entry", takesEntry: true },
-	{ name: "cache", description: "Manage the clone cache (~/.pi/reference/cache/)" },
+	{ name: "cache", description: "Manage the clone cache (~/.pi/agent/extensions/data/pi-reference/cache/)" },
 ];
 
 const CACHE_SUBCOMMANDS: readonly { name: string; description: string; takesCacheEntry?: boolean }[] = [
@@ -203,7 +203,7 @@ export async function handleHelp(ctx: ExtensionContext) {
 			"  relevance <name> <text> Set project relevance (local only)",
 			"  notes <name> <text>     Set agent notes for an entry",
 			"",
-			"  cache list              Show cached repos (~/.pi/reference/cache/)",
+			"  cache list              Show cached repos (~/.pi/agent/extensions/data/pi-reference/cache/)",
 			"  cache update [name]     Pull latest for cached repos (or one repo)",
 			"  cache remove <name>     Remove a repo from the cache",
 			"  cache clear             Clear the entire cache",

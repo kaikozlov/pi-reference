@@ -9,7 +9,7 @@
  * - Commands: /reference init, list, add, remove, index, describe, relevance, cache
  * - LLM tool: `ref` for programmatic access, including `info` for deep inspection
  * - Sidecar files (REFERENCE/sidecar/<name>.md) with YAML frontmatter for metadata
- * - Shared clone cache at ~/.pi/reference/cache/ with write-through description sync
+ * - Shared clone cache at ~/.pi/agent/extensions/data/pi-reference/cache/ with write-through description sync
  * - Proactive description seeding via GitHub API on add
  */
 

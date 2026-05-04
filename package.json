@@ -2,9 +2,25 @@
   "name": "pi-reference",
   "version": "0.1.0",
   "description": "Manage a REFERENCE/ directory for project context — repos, files, docs",
+  "type": "module",
   "keywords": ["pi-package"],
   "private": true,
   "pi": {
     "extensions": ["./index.ts"]
-  }
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*",
+    "@sinclair/typebox": "*"
+  },
+  "devDependencies": {
+    "bun-types": "^1.3.11",
+    "typescript": "^6.0.2"
+  },
+  "trustedDependencies": [
+    "@google/genai",
+    "koffi",
+    "protobufjs"
+  ]
 }
