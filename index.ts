@@ -15,7 +15,7 @@
 
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getRefDir, getIndexFile } from "./src/helpers";
 import { generateIndex, generateManifest } from "./src/index-gen";
 import {

@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Type } from "@sinclair/typebox";
-import { StringEnum } from "@mariozechner/pi-ai";
+import { StringEnum } from "@earendil-works/pi-ai";
 import { getRefDir, ensureRefDir, isGitRepo, runGit, formatSize } from "./helpers";
 import { generateIndex } from "./index-gen";
 import { addRepo, addFile, addNpmPackage, removeEntry } from "./entries";

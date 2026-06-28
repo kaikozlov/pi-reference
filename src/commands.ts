@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { fuzzyFilter, matchesKey, type AutocompleteItem } from "@mariozechner/pi-tui";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { fuzzyFilter, matchesKey, type AutocompleteItem } from "@earendil-works/pi-tui";
 import { getRefDir, listEntries, ensureRefDir, isGitRepo, runGit } from "./helpers";
 import { generateIndex } from "./index-gen";
 import { listCache, updateCacheEntry, updateAllCache, removeCacheEntry, clearCache, getCacheSize } from "./cache";
