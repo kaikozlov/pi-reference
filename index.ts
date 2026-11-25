@@ -38,6 +38,14 @@ import { registerRefTool } from "./src/tool";
 
 // ─── Extension ───────────────────────────────────────────────────────
 
+/**
+ * Append `addition` to the system prompt an agent-start event carries: upstream pi hands it over
+ * as one string, omp as a list of sections, and each expects the result back in the same shape.
+ */
+function appendSystemPrompt<T extends string | string[]>(systemPrompt: T, addition: string): T {
+	return (Array.isArray(systemPrompt) ? [...systemPrompt, addition] : `${systemPrompt}\n${addition}`) as T;
+}
+
 export default function referenceExtension(pi: ExtensionAPI) {
 	const state: RefState = {
 		refInitialized: false,
@@ -63,7 +71,7 @@ export default function referenceExtension(pi: ExtensionAPI) {
 
 	// ─── System prompt injection ────────────────────────────────────
 
-	pi.on("before_agent_start", async (event) => {
+	pi.on("before_agent_start", async (event, ctx) => {
 		const additions: string[] = [];
 
 		additions.push(`
@@ -79,7 +87,7 @@ This project uses a \`REFERENCE/\` directory in the repo root to collect referen
 `);
 
 		if (state.refInitialized) {
-			const manifest = await generateManifest(event.cwd ?? "");
+			const manifest = await generateManifest(ctx.cwd);
 			if (manifest) {
 				additions.push("### Reference entries");
 				additions.push("```");
@@ -96,7 +104,7 @@ This project uses a \`REFERENCE/\` directory in the repo root to collect referen
 
 		if (additions.length > 0) {
 			return {
-				systemPrompt: event.systemPrompt + "\n" + additions.join("\n"),
+				systemPrompt: appendSystemPrompt(event.systemPrompt, additions.join("\n")),
 			};
 		}
 	});

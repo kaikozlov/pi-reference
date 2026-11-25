@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { fuzzyFilter, matchesKey, type AutocompleteItem } from "@earendil-works/pi-tui";
+import { fuzzyFilter } from "./fuzzy";
 import { getRefDir, listEntries, ensureRefDir, isGitRepo, runGit } from "./helpers";
 import { generateIndex } from "./index-gen";
 import { listCache, updateCacheEntry, updateAllCache, removeCacheEntry, clearCache, getCacheSize } from "./cache";
@@ -16,6 +16,13 @@ import { getCacheMetaEntry, setCacheDescription, seedDescription } from "./cache
 export interface RefState {
 	refInitialized: boolean;
 	indexContent: string | null;
+}
+
+/** One `/reference …` argument suggestion, in the autocomplete item shape pi and omp both accept. */
+interface AutocompleteItem {
+	value: string;
+	label: string;
+	description?: string;
 }
 
 // ─── Subcommand definitions ──────────────────────────────────────────
@@ -142,7 +149,29 @@ export function getArgumentCompletions(argumentPrefix: string): AutocompleteItem
 
 // ─── Overlay helpers ─────────────────────────────────────────────────
 
-/** Show text in a centered overlay panel. */
+/** Split `text` into lines at most `width` characters wide. */
+function wrapLines(text: string, width: number): string[] {
+	if (width < 1) return [""];
+	return text.split("\n").flatMap(line => line.match(new RegExp(`.{1,${width}}`, "gu")) ?? [""]);
+}
+
+/**
+ * Whether raw terminal input is Escape or Ctrl+C: the lone `ESC` / `0x03` bytes, or the same keys
+ * as CSI sequences from the kitty keyboard protocol (`CSI … u`) or xterm modifyOtherKeys
+ * (`CSI … ~`): `CSI <key>[:<shifted>[:<base>]][;<modifiers>[:<event>]]`.
+ */
+function isDismissKey(data: string): boolean {
+	if (data === "\x1b" || data === "\x03") return true;
+
+	const sequence = /^\x1b\[(\d+)(?::\d*)*(?:;(\d+))?(?::\d+)?[u~]$/.exec(data);
+	if (!sequence) return false;
+
+	// Key 27 is Escape, key 99 is `c`; the modifier field is 1 plus a bitmask where Ctrl is 4.
+	const modifiers = Number(sequence[2] ?? 1) - 1;
+	return sequence[1] === "27" ? (modifiers & 15) === 0 : sequence[1] === "99" && (modifiers & 15) === 4;
+}
+
+/** Show text in an overlay panel that Escape or Ctrl+C closes. */
 async function showPanel(ctx: ExtensionContext, title: string, body: string, width = 72): Promise<void> {
 	if (!ctx.hasUI) {
 		ctx.ui.notify(body, "info");
@@ -153,12 +182,12 @@ async function showPanel(ctx: ExtensionContext, title: string, body: string, wid
 		(_tui, theme, _kb, done) => {
 			return {
 				render(w: number): string[] {
-					const panelWidth = Math.min(width, w - 4);
+					const panelWidth = Math.min(width, Math.max(0, w - 4));
 					const lines: string[] = [];
 					lines.push("");
 					lines.push(theme.fg("accent", ` ${title} `));
 					lines.push(theme.fg("borderMuted", "─".repeat(panelWidth)));
-					for (const line of body.split("\n")) {
+					for (const line of wrapLines(body, panelWidth)) {
 						lines.push(theme.fg("text", line));
 					}
 					lines.push("");
@@ -167,13 +196,13 @@ async function showPanel(ctx: ExtensionContext, title: string, body: string, wid
 					return lines;
 				},
 				handleInput(data: string) {
-					if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
+					if (isDismissKey(data)) {
 						done();
 					}
 				},
 			};
 		},
-		{ overlay: true, overlayOptions: { anchor: "center", width } },
+		{ overlay: true },
 	);
 }
 
